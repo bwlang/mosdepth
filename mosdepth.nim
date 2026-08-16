@@ -251,7 +251,8 @@ proc coverage(bam: hts.Bam, arr: var coverage_t, region: var region_t,
     targets: seq[Target], mapq: int = -1, min_len: int = -1,
     max_len: int = int.high, eflag: uint16 = 1796, iflag: uint16 = 0,
     read_groups: seq[string] = (@[]), fast_mode: bool = false,
-    fragment_mode: bool = false, last_tid: var int = -1): int =
+    fragment_mode: bool = false, exclude_tags: seq[string] = (@[]),
+    last_tid: var int = -1): int =
   # depth updates arr in-place and yields the tid for each chrom.
   # returns -1 if the chrom is not found in the bam header
   # returns -2 if the chrom was found in the header, but there was no data for it
@@ -261,6 +262,7 @@ proc coverage(bam: hts.Bam, arr: var coverage_t, region: var region_t,
     mate: Record
     seen = newTable[string, Record]()
     has_read_groups = read_groups.len > 0
+    has_exclude_tags = exclude_tags.len > 0
 
   var tid = if region != nil: get_tid(targets, region.chrom, last_tid) else: -1
   if tid == -1:
@@ -283,6 +285,20 @@ proc coverage(bam: hts.Bam, arr: var coverage_t, region: var region_t,
       var t = tag[string](rec, "RG")
       if t.isNone or not read_groups.contains(t.get):
         continue
+    # --exclude-tag TAG:VALUE. A read is dropped only when the tag is PRESENT and matches;
+    # an absent tag never excludes. That asymmetry is deliberate -- the motivating case is
+    # duplicate-type tags (DT:Z:SQ optical vs DT:Z:LB library), where only duplicates carry the
+    # tag at all and the untagged majority must be kept.
+    if has_exclude_tags:
+      var drop = false
+      for spec in exclude_tags:
+        let c = spec.find(':')
+        if c <= 0: continue
+        var t = tag[string](rec, spec[0 ..< c])
+        if t.isSome and t.get == spec[(c+1) .. ^1]:
+          drop = true
+          break
+      if drop: continue
     if tgt.tid != rec.b.core.tid:
       raise newException(OSError, "expected only a single chromosome per query")
 
@@ -633,6 +649,10 @@ proc main(bam: hts.Bam, chrom: region_t, mapq: int, min_len: int, max_len: int, 
   if $args["--read-groups"] != "nil":
     for r in ($args["--read-groups"]).split(','):
       read_groups.add($r)
+  var exclude_tags: seq[string] = @[]
+  if $args["--exclude-tag"] != "nil":
+    for r in ($args["--exclude-tag"]).split(','):
+      exclude_tags.add($r)
   var levels = get_min_levels(targets)
 
   var chrom_region_distribution = newSeq[int64](region_distribution.len)
@@ -706,7 +726,7 @@ proc main(bam: hts.Bam, chrom: region_t, mapq: int, min_len: int, max_len: int, 
     rchrom = region_t(chrom: target.name)
     var tid = coverage(bam, arr, rchrom, targets, mapq, min_len, max_len, eflag,
         iflag, read_groups = read_groups, fast_mode = fast_mode,
-        fragment_mode = fragment_mode,
+        fragment_mode = fragment_mode, exclude_tags = exclude_tags,
         last_tid = last_tid)
     if tid == -1: continue # -1 means that chrom is not even in the bam
     if tid != -2: # -2 means there were no reads in the bam
@@ -913,6 +933,10 @@ Other options:
                                     by ','.
   -m --use-median                   output median of each region (in --by) instead of mean.
   -R --read-groups <string>         only calculate depth for these comma-separated read groups IDs.
+  --exclude-tag <TAG:VALUE>         exclude reads carrying this string tag with this exact value,
+                                    e.g. DT:SQ to drop optical duplicates while keeping PCR
+                                    duplicates. Reads lacking the tag are never excluded. May be
+                                    given as a comma-separated list (DT:SQ,XX:YY).
   -h --help                         show help
   """
 
@@ -979,6 +1003,9 @@ Other options:
 
   if $args["--read-groups"] != "nil":
     opts = opts or SamField.SAM_RGAUX.int
+  # an arbitrary aux tag cannot be read from CRAM unless the aux block is decoded
+  if $args["--exclude-tag"] != "nil":
+    opts = opts or SamField.SAM_AUX.int
 
   discard bam.set_option(FormatOption.CRAM_OPT_REQUIRED_FIELDS, opts)
   discard bam.set_option(FormatOption.CRAM_OPT_DECODE_MD, 0)
