@@ -251,7 +251,8 @@ proc coverage(bam: hts.Bam, arr: var coverage_t, region: var region_t,
     targets: seq[Target], mapq: int = -1, min_len: int = -1,
     max_len: int = int.high, eflag: uint16 = 1796, iflag: uint16 = 0,
     read_groups: seq[string] = (@[]), fast_mode: bool = false,
-    fragment_mode: bool = false, exclude_tags: seq[string] = (@[]),
+    fragment_mode: bool = false,
+    exclude_tags: seq[tuple[tag: string, value: string]] = (@[]),
     last_tid: var int = -1): int =
   # depth updates arr in-place and yields the tid for each chrom.
   # returns -1 if the chrom is not found in the bam header
@@ -291,11 +292,9 @@ proc coverage(bam: hts.Bam, arr: var coverage_t, region: var region_t,
     # tag at all and the untagged majority must be kept.
     if has_exclude_tags:
       var drop = false
-      for spec in exclude_tags:
-        let c = spec.find(':')
-        if c <= 0: continue
-        var t = tag[string](rec, spec[0 ..< c])
-        if t.isSome and t.get == spec[(c+1) .. ^1]:
+      for ex in exclude_tags:
+        var t = tag[string](rec, ex.tag)
+        if t.isSome and t.get == ex.value:
           drop = true
           break
       if drop: continue
@@ -649,10 +648,15 @@ proc main(bam: hts.Bam, chrom: region_t, mapq: int, min_len: int, max_len: int, 
   if $args["--read-groups"] != "nil":
     for r in ($args["--read-groups"]).split(','):
       read_groups.add($r)
-  var exclude_tags: seq[string] = @[]
+  var exclude_tags: seq[tuple[tag: string, value: string]] = @[]
   if $args["--exclude-tag"] != "nil":
-    for r in ($args["--exclude-tag"]).split(','):
-      exclude_tags.add($r)
+    for spec in ($args["--exclude-tag"]).split(','):
+      # split once here so the per-alignment check is a plain comparison.
+      let c = spec.find(':')
+      if c <= 0:
+        stderr.write_line("[mosdepth] error --exclude-tag expects TAG:VALUE, got '" & spec & "'")
+        quit(2)
+      exclude_tags.add((tag: spec[0 ..< c], value: spec[(c+1) .. ^1]))
   var levels = get_min_levels(targets)
 
   var chrom_region_distribution = newSeq[int64](region_distribution.len)
